@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+env/
+*.log
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+.env.local
+
+# Data files (Large)
+data/raw/
+data/processed/
+*.mp4
+*.mp3
+*.wav
+*.pdf
+*.apk
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
