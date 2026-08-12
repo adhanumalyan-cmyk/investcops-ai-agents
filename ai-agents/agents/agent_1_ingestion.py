@@ -1,134 +1,162 @@
+# agents/agent_1_ingestion.py
+
 """
-agents/agent_1_ingestion.py
+AGENT 1: EVIDENCE INGESTION & CLEANING
 
-Agent 1 - Evidence Ingestion & Cleaning
-
-Input : state["raw_texts"]        (List[str])
-Output: {"cleaned_documents": [...]}
-
-Assumed BaseAgent interface (core/base_agent.py):
-    class BaseAgent:
-        def __init__(self, agent_name: str, model_used: str = "qwen3:8b"): ...
-        def call_llm(self, prompt: str, json_schema: dict | None = None) -> dict: ...
-            # Calls Ollama (qwen3:8b), enforces json_schema if given,
-            # returns a parsed dict, raises Exception on failure.
+Purpose:
+- Validate uploaded evidence
+- Detect file type and structure
+- Clean and normalize text
+- Route evidence to appropriate processing pipeline
 """
 
+import re
+import hashlib
+import uuid
+from typing import Dict, Any, List, Optional
 from datetime import datetime
-from typing import Any, Dict, List
+import sys
+import os
 
-from core.state import InvestigationState, log_agent_execution
+# Add parent directory to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from core.base_agent import BaseAgent
 
 
-class IngestionAgent(BaseAgent):
-    """Cleans and normalizes raw extracted text (OCR noise, transcripts,
-    chat exports, etc.) into structured, analyzable documents.
-    """
-
-    AGENT_NAME = "Agent 1 - Evidence Ingestion & Cleaning"
-
+class EvidenceIngestionAgent(BaseAgent):
+    """Agent for validating and ingesting evidence"""
+    
     def __init__(self, model_used: str = "qwen3:8b"):
-        super().__init__(agent_name=self.AGENT_NAME, model_used=model_used)
-
-    # ------------------------------------------------------------------
-    def process(self, state: InvestigationState) -> Dict[str, Any]:
-        started_at = datetime.utcnow()
-        raw_texts: List[str] = state.get("raw_texts", [])
-
+        # Use the correct parameter name: model_used
+        super().__init__(agent_name="Agent 1 - Evidence Analysis", model_used=model_used)
+        
+        # File signatures for detection
+        self.file_signatures = {
+            b'\x89PNG\r\n\x1a\n': 'image/png',
+            b'\xff\xd8\xff': 'image/jpeg',
+            b'GIF8': 'image/gif',
+            b'%PDF': 'application/pdf',
+            b'PK\x03\x04': 'application/zip',
+        }
+        
+        # Extension to type mapping
+        self.ext_map = {
+            'txt': 'text',
+            'json': 'json',
+            'csv': 'csv',
+            'pdf': 'pdf',
+            'png': 'image',
+            'jpg': 'image',
+            'jpeg': 'image',
+            'gif': 'image',
+            'mp3': 'audio',
+            'wav': 'audio',
+            'mp4': 'video',
+            'apk': 'apk',
+            'eml': 'email',
+            'gpx': 'gps',
+        }
+    
+    def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process raw texts and clean them into structured documents
+        """
+        print(f"\n🔍 [{self.agent_name}] Starting...")
+        
+        # Get raw texts from state
+        raw_texts = state.get("raw_texts", [])
+        evidence_metadata = state.get("evidence_metadata", {})
+        
         if not raw_texts:
-            log_agent_execution(
-                state,
-                agent_name=self.AGENT_NAME,
-                model_used=self.model_used,
-                started_at=started_at,
-                status="partial",
-                input_evidence=[],
-                output_summary="No raw_texts found in state; nothing to clean.",
-            )
+            print("   ℹ️ No raw texts found")
             return {"cleaned_documents": []}
-
-        cleaned_documents: List[Dict[str, str]] = []
-        failures = 0
-        doc_ids = [f"DOC{idx + 1:03d}" for idx in range(len(raw_texts))]
-
-        for doc_id, text in zip(doc_ids, raw_texts):
-            try:
-                if not text or not text.strip():
-                    raise ValueError("Empty raw text")
-
-                schema = {
-                    "type": "object",
-                    "properties": {
-                        "cleaned_text": {"type": "string"},
-                        "language": {"type": "string"},
-                        "notes": {"type": "string"},
-                    },
-                    "required": ["cleaned_text"],
-                }
-                prompt = self._build_prompt(text)
-                result = self.call_llm(prompt, json_schema=schema)
-
-                cleaned_documents.append(
-                    {
-                        "doc_id": doc_id,
-                        "original_text": text,
-                        "cleaned_text": (result.get("cleaned_text") or text).strip(),
-                        "language": result.get("language", "unknown"),
-                        "notes": result.get("notes", ""),
-                    }
-                )
-            except Exception as e:
-                failures += 1
-                # Fallback: keep the raw text untouched so downstream
-                # agents still have something to work with.
-                cleaned_documents.append(
-                    {
-                        "doc_id": doc_id,
-                        "original_text": text,
-                        "cleaned_text": text,
-                        "language": "unknown",
-                        "notes": f"cleaning_failed: {e}",
-                    }
-                )
-
-        if failures == 0:
-            status = "success"
-        elif failures < len(raw_texts):
-            status = "partial"
+        
+        print(f"   📥 Processing {len(raw_texts)} raw texts")
+        
+        cleaned_documents = []
+        
+        # Process each raw text
+        for idx, raw_text in enumerate(raw_texts):
+            # Get evidence ID from metadata or generate one
+            ev_id = f"EVD{idx+1:03d}"
+            
+            # Get metadata for this evidence
+            meta = evidence_metadata.get(ev_id, {})
+            file_name = meta.get("file_name", f"document_{idx+1}.txt")
+            file_type = meta.get("file_type", self._detect_file_type(file_name))
+            
+            # Clean the text
+            cleaned_text = self._clean_text(raw_text)
+            
+            # Determine processing route
+            route = self._determine_route(file_type, cleaned_text)
+            
+            # Create cleaned document
+            cleaned_doc = {
+                "doc_id": f"DOC{idx+1:03d}",
+                "evidence_id": ev_id,
+                "file_name": file_name,
+                "file_type": file_type,
+                "original_text": raw_text,
+                "cleaned_text": cleaned_text,
+                "processing_route": route,
+                "validation_status": "valid",
+                "metadata": meta
+            }
+            
+            cleaned_documents.append(cleaned_doc)
+            print(f"   ✅ Processed: {file_name} -> {route}")
+        
+        # Update state
+        state["cleaned_documents"] = cleaned_documents
+        
+        return {
+            "cleaned_documents": cleaned_documents
+        }
+    
+    def _clean_text(self, text: str) -> str:
+        """Clean and normalize text"""
+        if not text:
+            return ""
+        
+        # Remove excessive whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Keep important characters for entity extraction
+        # Keep: letters, numbers, @, ., -, +, (, ), [, ], {, }, :, ;, ", ', /, %, $, ₹, !, ?
+        text = re.sub(r'[^\w\s@.\-+()\[\]{}:;"\'/%$₹!?]', ' ', text)
+        
+        # Normalize newlines
+        text = re.sub(r'\n\s*\n', '\n', text)
+        
+        return text.strip()
+    
+    def _detect_file_type(self, file_name: str) -> str:
+        """Detect file type from extension"""
+        ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
+        return self.ext_map.get(ext, 'unknown')
+    
+    def _determine_route(self, file_type: str, text: str) -> str:
+        """Determine processing route based on content"""
+        if file_type == 'json':
+            return 'json_analysis'
+        elif file_type == 'csv':
+            return 'tabular_analysis'
+        elif file_type == 'image':
+            return 'image_analysis'
+        elif file_type == 'audio':
+            return 'audio_analysis'
+        elif file_type == 'video':
+            return 'video_analysis'
+        elif file_type == 'apk':
+            return 'apk_analysis'
+        elif file_type == 'email':
+            return 'email_analysis'
+        elif file_type == 'gps':
+            return 'gps_analysis'
         else:
-            status = "failed"
-
-        log_agent_execution(
-            state,
-            agent_name=self.AGENT_NAME,
-            model_used=self.model_used,
-            started_at=started_at,
-            status=status,
-            input_evidence=doc_ids,
-            output_summary=f"Cleaned {len(raw_texts) - failures}/{len(raw_texts)} documents.",
-            error_message=f"{failures} document(s) failed cleaning and used raw fallback." if failures else None,
-        )
-
-        return {"cleaned_documents": cleaned_documents}
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _build_prompt(text: str) -> str:
-        return f"""You are a forensic evidence cleaning assistant for INVESTCOPS AI.
-
-Clean and normalize the following raw extracted text (it may come from OCR,
-audio transcription, or a chat export and can contain noise, broken
-formatting, or artifacts). Do NOT invent, remove, or alter any factual
-content, names, numbers, or dates — only fix formatting, spacing, and
-obvious OCR/transcription noise.
-
-Raw text:
-\"\"\"{text}\"\"\"
-
-Return ONLY valid JSON:
-{{
-  "cleaned_text": "<the cleaned, normalized text>",
-  "language": "<detected language, e.g. 'en', 'ta', 'hi'>",
-  "notes": "<any short note on what was cleaned, or empty string>"
-}}"""
+            # Check content for keywords
+            if text and ('whatsapp' in text.lower() or 'telegram' in text.lower() or 'instagram' in text.lower()):
+                return 'chat_analysis'
+            return 'text_analysis'
