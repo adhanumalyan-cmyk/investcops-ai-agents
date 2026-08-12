@@ -1,37 +1,37 @@
 {
-  "name": "investcops-frontend",
+  "name": "notenext-liquid-glass-dashboard",
   "private": true,
-  "version": "0.0.0",
+  "version": "4.1.0",
   "type": "module",
+  "description": "NoteNext - Liquid Glass Intelligence Dashboard with Blockchain, Deepfake, APK Scanner & Qwen3 FIR (Connected Backend)",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "preview": "vite preview"
+    "build": "vite build",
+    "preview": "vite preview",
+    "backend": "python backend/main.py",
+    "dev:full": "concurrently \"python backend/main.py\" \"vite --host 0.0.0.0 --port 5173\"",
+    "test:backend": "curl http://localhost:8000/api/health"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-router-dom": "^6.22.0",
-    "zustand": "^4.5.0",
-    "firebase": "^10.8.0",
-    "axios": "^1.6.0",
-    "jwt-decode": "^4.0.0",
-    "recharts": "^2.10.0"
+    "clsx": "2.1.1",
+    "framer-motion": "^12.43.0",
+    "lucide-react": "^1.28.0",
+    "ogl": "^1.0.11",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "recharts": "^3.10.1",
+    "tailwind-merge": "3.4.0",
+    "three": "^0.185.1"
   },
   "devDependencies": {
-    "@types/react": "^18.2.43",
-    "@types/react-dom": "^18.2.17",
-    "@typescript-eslint/eslint-plugin": "^6.14.0",
-    "@typescript-eslint/parser": "^6.14.0",
-    "@vitejs/plugin-react": "^4.2.1",
-    "autoprefixer": "^10.4.16",
-    "eslint": "^8.55.0",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "eslint-plugin-react-refresh": "^0.4.5",
-    "postcss": "^8.4.32",
-    "tailwindcss": "^3.3.6",
-    "typescript": "^5.2.2",
-    "vite": "^5.0.8"
+    "@tailwindcss/vite": "4.1.17",
+    "@types/node": "22.19.17",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.1",
+    "tailwindcss": "4.1.17",
+    "typescript": "5.9.3",
+    "vite": "7.3.2",
+    "vite-plugin-singlefile": "2.3.0"
   }
 }

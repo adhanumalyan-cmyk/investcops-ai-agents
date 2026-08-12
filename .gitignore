@@ -23,6 +23,10 @@ data/processed/
 # Environment
 .env
 
+# Backend runtime artifacts
+ledger.json
+field_backups/
+
 # IDE
 .vscode/
 .idea/
