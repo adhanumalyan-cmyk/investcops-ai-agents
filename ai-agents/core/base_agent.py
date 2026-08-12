@@ -4,12 +4,14 @@ import ollama
 from typing import Optional, Dict, Any
 
 class BaseAgent:
-    def __init__(self, model_name: str = "qwen3:8b"):
+    def __init__(self, agent_name: str = "BaseAgent", model_used: str = "qwen3:8b"):
         """
         Neengatha model mathanum na, inga 'qwen3:8b' nu irukka sthalathula mathikonga.
         Example: 'llama3.1:8b' or 'gemma2:9b'.
         """
-        self.model_name = model_name
+        self.agent_name = agent_name
+        self.model_used = model_used
+        self.model_name = model_used
 
     def _clean_json(self, raw_output: str) -> Dict[str, Any]:
         """
