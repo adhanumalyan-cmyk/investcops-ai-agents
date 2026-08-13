@@ -26,6 +26,11 @@ data/processed/
 # Backend runtime artifacts
 ledger.json
 field_backups/
+*.db
+*.sqlite3
+backend/data/
+.pytest_cache/
+.ruff_cache/
 
 # IDE
 .vscode/

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.db
+*.sqlite3
+.env
+.env.*
+!.env.example
+data/
+field_backups/
+ledger.json
+.pytest_cache/
+tests/

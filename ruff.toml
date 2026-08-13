@@ -1,0 +1,19 @@
+# Ruff lint configuration for InvestCops AI.
+# Selection mirrors a practical FastAPI baseline: syntax errors, unused
+# imports/variables, undefined names, and import sorting. Deeper style
+# rules (DTZ, BLE, ...) are intentionally not enforced.
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+"ai-agents/tests/*" = ["E402"]
+"ai-agents/agents/*" = ["E402"]
+"backend/tests/*" = ["E402"]
+"backend/app/graph/*" = ["E402"]
+"backend/app/services/agent_service.py" = ["E402"]
+
+[lint.isort]
+known-first-party = ["app", "agents", "core", "orchestrator"]

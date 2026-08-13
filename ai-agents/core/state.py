@@ -1,228 +1,416 @@
 """
-core/state.py
+Shared investigation state.
 
-Shared LangGraph state for INVESTCOPS AI.
-
-This TypedDict is passed between ALL agents (Agent 1 -> Agent 11) in the
-pipeline. Every agent reads what it needs from this state and writes its
-output back into it. Keep this file identical across all team members'
-branches -- it is the shared "contract" of the whole system.
+Typed, validated, serializable state passed between the 11 investigation
+agents. Sensitive/large binary evidence is never stored here -- only
+references and processed artifacts.
 """
 
-from typing import TypedDict, List, Dict, Optional, Any, Literal
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field, field_validator
 
 
-# ---------------------------------------------------------------------------
-# Supporting sub-structures (used inside the main state)
-# ---------------------------------------------------------------------------
+class AgentStatus(str, Enum):
+    """Allowed agent execution statuses (section 8 of the spec)."""
 
-class EvidenceMetadata(TypedDict):
-    """Metadata for a single piece of uploaded evidence."""
-    evidence_id: str          # e.g. "EVD003"
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+
+
+class ValidationStatus(str, Enum):
+    """Evidence validation status produced by Agent 1."""
+
+    VALID = "VALID"
+    INVALID = "INVALID"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+
+
+class ReviewStatus(str, Enum):
+    """Human review status used across high-impact results (section 34)."""
+
+    PENDING_REVIEW = "PENDING_REVIEW"
+    VERIFIED = "VERIFIED"
+    REJECTED = "REJECTED"
+    REQUIRES_MORE_EVIDENCE = "REQUIRES_MORE_EVIDENCE"
+
+
+def utc_now_iso() -> str:
+    """Current UTC time as ISO-8601 string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_id(prefix: str) -> str:
+    """Generate a short unique identifier with a readable prefix."""
+    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+class MimeType(str, Enum):
+    """Supported evidence MIME types (Agent 1)."""
+
+    TEXT = "text/plain"
+    JSON = "application/json"
+    PDF = "application/pdf"
+    JPEG = "image/jpeg"
+    PNG = "image/png"
+    MP4 = "video/mp4"
+    WEBM = "video/webm"
+    MP3 = "audio/mpeg"
+    WAV = "audio/wav"
+    M4A = "audio/mp4"
+    APK = "application/vnd.android.package-archive"
+    HTML = "text/html"
+    CSV = "text/csv"
+    ARCHIVE = "application/zip"
+
+
+class SourceType(str, Enum):
+    """Evidence source classification (Agent 1)."""
+
+    CHAT_WHATSAPP = "chat_whatsapp"
+    CHAT_TELEGRAM = "chat_telegram"
+    CHAT_INSTAGRAM = "chat_instagram"
+    EMAIL = "email"
+    DOCUMENT = "document"
+    IMAGE = "image"
+    VIDEO = "video"
+    AUDIO = "audio"
+    GPS = "gps"
+    TRANSACTION = "transaction"
+    DEVICE = "device"
+    APK = "apk"
+    CALL_LOG = "call_log"
+    OTHER = "other"
+
+
+class Provenance(BaseModel):
+    """Evidence provenance for an AI finding (section 9)."""
+
+    evidence_id: str = Field(description="Evidence record that produced this finding")
+    source_reference: str = Field(default="", description="Locator inside the evidence")
+    file_name: str = Field(default="")
+    page: Optional[int] = None
+    message_id: Optional[str] = None
+    timestamp: Optional[str] = None
+    excerpt_or_locator: str = Field(default="", description="Short excerpt or line number")
+    agent_name: str = Field(default="")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    def model_dump_compact(self) -> Dict[str, Any]:
+        return self.model_dump(exclude_none=True)
+
+
+class AgentResult(BaseModel):
+    """Common structured output envelope for every agent (section 8)."""
+
+    agent_name: str
+    case_id: str
+    status: AgentStatus = AgentStatus.COMPLETED
+    evidence_ids: List[str] = Field(default_factory=list)
+    result: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Derived, not fabricated")
+    evidence_references: List[Provenance] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    agent_version: str = Field(default="")
+    prompt_version: str = Field(default="")
+    model_used: str = Field(default="deterministic")
+    error_message: Optional[str] = None
+    duration_ms: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.model_dump(mode="json")
+
+    @field_validator("confidence")
+    @classmethod
+    def _clamp_confidence(cls, v: float) -> float:
+        return max(0.0, min(1.0, v))
+
+
+class EvidenceRecord(BaseModel):
+    """Evidence item submitted for ingestion (Agent 1 input)."""
+
+    evidence_id: str = Field(default_factory=lambda: new_id("E"))
     file_name: str
-    file_type: str            # pdf, image, audio, video, apk, txt, etc.
-    file_size: int             # bytes
-    source: str                 # e.g. "WhatsApp export", "CCTV", "Phone dump"
-    hash: str                    # SHA-256 hash for chain of custody
-    uploaded_by: str
-    uploaded_at: str              # ISO timestamp string
+    mime_type: str = "application/octet-stream"
+    size: int = Field(default=0, ge=0)
+    sha256: str = Field(default="")
+    source_type: SourceType = SourceType.OTHER
+    validation_status: ValidationStatus = ValidationStatus.NEEDS_REVIEW
+    integrity_status: str = "NOT_CHECKED"
+    warnings: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    storage_path: str = Field(default="", description="Internal storage reference, never a raw user path")
+    uploaded_at: str = Field(default_factory=utc_now_iso)
+    review_status: ReviewStatus = ReviewStatus.PENDING_REVIEW
 
 
-class ConfidenceScore(TypedDict):
-    """Confidence score attached to any AI-generated result."""
-    item_id: str                # id of the entity / relationship / event / finding
-    category: Literal[
-        "entity", "relationship", "timeline", "contradiction", "risk"
-    ]
-    score: float                  # 0.0 - 1.0
-    reason: Optional[str]          # short explanation for the score
+class EvidenceAnalysisResult(BaseModel):
+    """Agent 2 output for one evidence item."""
+
+    evidence_id: str
+    summary: str = ""
+    key_findings: List[str] = Field(default_factory=list)
+    relevance: float = Field(default=0.0, ge=0.0, le=1.0)
+    indicators: List[str] = Field(default_factory=list)
+    limitations: List[str] = Field(default_factory=list)
 
 
-class EvidenceReference(TypedDict):
-    """Links an AI-generated finding back to the exact evidence that supports it."""
-    finding: str                 # human-readable claim, e.g. "Rahul contacted victim at 10:32 PM"
-    evidence_id: str               # e.g. "EVD003"
-    source: str                      # e.g. "WhatsApp message"
-    timestamp: Optional[str]          # when the evidence event occurred
-    excerpt: Optional[str]             # short supporting snippet/quote from the evidence
+class Entity(BaseModel):
+    """Entity extracted by Agent 3."""
+
+    entity_id: str = Field(default_factory=lambda: new_id("ENT"))
+    entity_type: str = "OTHER"
+    value: str
+    normalized_value: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence_id: str = ""
+    source_reference: str = ""
+    frequency: int = Field(default=1, ge=1)
+    first_seen: str = ""
+    last_seen: str = ""
 
 
-class AgentExecutionMetadata(TypedDict):
-    """Execution/audit trail for a single agent run. Used for debugging & demo."""
-    agent_name: str               # e.g. "Agent 2 - Entity Extraction"
-    model_used: str                 # e.g. "qwen3:8b"
-    started_at: str                   # ISO timestamp
-    execution_time_seconds: float
-    status: Literal["success", "failed", "partial"]
-    input_evidence: List[str]          # list of evidence_ids consumed
-    output_summary: Optional[str]       # brief description of what was produced
-    error_message: Optional[str]         # populated only if status == "failed"
+class Relationship(BaseModel):
+    """Relationship identified by Agent 4."""
+
+    relationship_id: str = Field(default_factory=lambda: new_id("REL"))
+    source_entity_id: str = ""
+    source_entity_value: str = ""
+    source_entity_type: str = ""
+    relation_type: str = "ASSOCIATED_WITH"
+    target_entity_id: str = ""
+    target_entity_value: str = ""
+    target_entity_type: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    supporting_evidence_ids: List[str] = Field(default_factory=list)
+    source_reference: str = ""
+    review_status: ReviewStatus = ReviewStatus.PENDING_REVIEW
 
 
-class HumanReviewStatus(TypedDict):
-    """Review status for sensitive AI outputs that need human sign-off."""
-    item_id: str                  # id of the finding/contradiction/risk/FIR section etc.
-    category: Literal[
-        "contradiction", "risk_score", "correlated_entity",
-        "fir_draft", "major_finding"
-    ]
-    status: Literal["pending_review", "verified", "rejected"]
-    reviewed_by: Optional[str]
-    reviewed_at: Optional[str]
-    notes: Optional[str]
+class CorrelationMatch(BaseModel):
+    """Agent 5 correlation between two entities across evidence."""
+
+    correlation_id: str = Field(default_factory=lambda: new_id("CORR"))
+    entity_a_id: str = ""
+    entity_a_value: str = ""
+    entity_b_id: str = ""
+    entity_b_value: str = ""
+    match_type: str = "possible_match"
+    match_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    supporting_evidence: List[str] = Field(default_factory=list)
+    review_status: ReviewStatus = ReviewStatus.PENDING_REVIEW
+    explanation: str = ""
 
 
-# ---------------------------------------------------------------------------
-# Main investigation state
-# ---------------------------------------------------------------------------
+class TimelineEvent(BaseModel):
+    """Agent 6 timeline event."""
 
-class InvestigationState(TypedDict):
-    # --- Core pipeline fields (original) ---
-    raw_texts: List[str]
-    evidence_metadata: Dict[str, EvidenceMetadata]          # keyed by evidence_id
-    cleaned_documents: List[Dict[str, str]]
-    entities: Dict[str, List[Dict[str, str]]]
-    relationships: List[Dict[str, str]]
-    correlated_entities: Dict[str, List[str]]
-    timeline: List[Dict[str, str]]
-    contradictions: List[Dict[str, str]]
-    risk_score: int
-    insights_summary: str
-    qa_history: List[Dict[str, str]]
-    mentor_recommendations: List[str]
-    fir_draft: str
-
-    # --- Supporting layers (added) ---
-    confidence_scores: List[ConfidenceScore]
-    evidence_references: List[EvidenceReference]
-    agent_execution_metadata: List[AgentExecutionMetadata]
-    human_review_status: List[HumanReviewStatus]
+    event_id: str = Field(default_factory=lambda: new_id("EVT"))
+    timestamp: str = ""  # ISO-8601 when parsed, else raw text
+    timestamp_iso: Optional[str] = None
+    event_type: str = "OTHER"
+    description: str = ""
+    entities: List[str] = Field(default_factory=list)
+    evidence_ids: List[str] = Field(default_factory=list)
+    source_reference: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
-# ---------------------------------------------------------------------------
-# Helper: build a fresh, empty state
-# ---------------------------------------------------------------------------
+class Contradiction(BaseModel):
+    """Agent 7 contradiction between two claims/evidence."""
 
-def get_initial_state() -> InvestigationState:
-    """Returns a fully-initialized, empty InvestigationState.
+    contradiction_id: str = Field(default_factory=lambda: new_id("CON"))
+    claim_a: str = ""
+    claim_b: str = ""
+    evidence_a: List[str] = Field(default_factory=list)
+    evidence_b: List[str] = Field(default_factory=list)
+    severity: str = "MEDIUM"  # LOW | MEDIUM | HIGH
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    explanation: str = ""
+    review_status: ReviewStatus = ReviewStatus.PENDING_REVIEW
 
-    Every agent module should be able to run against this without KeyErrors,
-    since all keys already exist (with empty/default values).
+
+class RiskFactor(BaseModel):
+    """One weighted, traceable factor contributing to the risk score."""
+
+    factor: str
+    weight: float
+    score_contribution: float
+    evidence_ids: List[str] = Field(default_factory=list)
+    basis: str = ""
+
+
+class RiskAssessment(BaseModel):
+    """Agent 8 output. Deterministic, reproducible."""
+
+    risk_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    risk_level: str = "UNASSESSED"  # LOW | MEDIUM | HIGH
+    risk_factors: List[RiskFactor] = Field(default_factory=list)
+    supporting_evidence: List[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    calculation_trace: List[str] = Field(default_factory=list)
+
+
+class FindingExplanation(BaseModel):
+    """Agent 9 explanation of one finding."""
+
+    what: str = ""
+    why_it_matters: str = ""
+    evidence_used: List[str] = Field(default_factory=list)
+    entity_contribution: List[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    uncertainty: str = ""
+    limitations: List[str] = Field(default_factory=list)
+
+
+class InsightsSummary(BaseModel):
+    """Agent 9 output."""
+
+    summary: str = ""
+    finding_explanations: List[FindingExplanation] = Field(default_factory=list)
+    evidence_contributions: List[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    limitations: List[str] = Field(default_factory=list)
+    generated_at: str = Field(default_factory=utc_now_iso)
+
+
+class QAExchange(BaseModel):
+    """Agent 10 Q&A exchange. Never fabricated; grounded in case state."""
+
+    question: str = ""
+    answer: str = ""
+    evidence_ids: List[str] = Field(default_factory=list)
+    source_references: List[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    limitations: List[str] = Field(default_factory=list)
+    asked_at: str = Field(default_factory=utc_now_iso)
+
+
+class MentorRecommendation(BaseModel):
+    """Agent 11 mentor recommendation."""
+
+    recommendation: str = ""
+    reason: str = ""
+    priority: str = "MEDIUM"  # LOW | MEDIUM | HIGH
+    supporting_evidence: List[str] = Field(default_factory=list)
+    expected_value: str = ""
+    estimated_confidence_improvement: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ReadinessAssessment(BaseModel):
+    """Agent 11 evidence readiness assessment."""
+
+    ready_for_review: bool = False
+    readiness_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    available_evidence: int = 0
+    missing_evidence: List[str] = Field(default_factory=list)
+    unresolved_contradictions: int = 0
+    chain_of_custody_ok: bool = False
+    validation_ok: bool = False
+    expert_validation_status: str = "NOT_REVIEWED"
+    legal_admissibility_claim: str = (
+        "This system does not determine legal admissibility. "
+        "A qualified legal/forensic expert must review the evidence."
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
+class FIRDraft(BaseModel):
+    """Agent 11 FIR draft. Human review required."""
+
+    fir_number: str = ""
+    case_id: str = ""
+    complainant: str = ""
+    accused: str = ""
+    date_of_occurrence: str = ""
+    place_of_occurrence: str = ""
+    overview: str = ""
+    facts: List[Dict[str, Any]] = Field(default_factory=list)  # {statement, evidence_ids, source_reference}
+    evidence_summary: List[str] = Field(default_factory=list)
+    legal_notes: List[str] = Field(default_factory=list)
+    disclaimer: str = "AI-GENERATED DRAFT - HUMAN REVIEW REQUIRED - NOT A LEGAL DOCUMENT"
+    generated_at: str = Field(default_factory=utc_now_iso)
+    review_status: ReviewStatus = ReviewStatus.PENDING_REVIEW
+
+
+class InvestigationState(BaseModel):
     """
-    return InvestigationState(
-        raw_texts=[],
-        evidence_metadata={},
-        cleaned_documents=[],
-        entities={},
-        relationships=[],
-        correlated_entities={},
-        timeline=[],
-        contradictions=[],
-        risk_score=0,
-        insights_summary="",
-        qa_history=[],
-        mentor_recommendations=[],
-        fir_draft="",
-        confidence_scores=[],
-        evidence_references=[],
-        agent_execution_metadata=[],
-        human_review_status=[],
-    )
+    Shared, typed, validated state for the investigation workflow.
 
-
-# ---------------------------------------------------------------------------
-# Small utility helpers agents can reuse (optional, but saves repetition)
-# ---------------------------------------------------------------------------
-
-def log_agent_execution(
-    state: InvestigationState,
-    agent_name: str,
-    model_used: str,
-    started_at: datetime,
-    status: Literal["success", "failed", "partial"],
-    input_evidence: Optional[List[str]] = None,
-    output_summary: Optional[str] = None,
-    error_message: Optional[str] = None,
-) -> None:
-    """Appends an AgentExecutionMetadata entry to state in-place.
-
-    Call this at the end of every agent's `run()` method so we always have
-    a full audit trail of the pipeline (useful for the demo + debugging).
+    Only references and processed artifacts are stored -- never raw binaries.
     """
-    execution_time = (datetime.utcnow() - started_at).total_seconds()
-    state["agent_execution_metadata"].append(
-        AgentExecutionMetadata(
-            agent_name=agent_name,
-            model_used=model_used,
-            started_at=started_at.isoformat(),
-            execution_time_seconds=execution_time,
-            status=status,
-            input_evidence=input_evidence or [],
-            output_summary=output_summary,
-            error_message=error_message,
+
+    case_id: str = ""
+    case_title: str = ""
+    case_description: str = ""
+
+    # Evidence pipeline (Agent 1 -> Agent 2)
+    evidence: List[EvidenceRecord] = Field(default_factory=list)
+    validated_evidence: List[EvidenceRecord] = Field(default_factory=list)
+    raw_texts: List[Dict[str, Any]] = Field(default_factory=list)
+    cleaned_documents: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_analyses: List[EvidenceAnalysisResult] = Field(default_factory=list)
+
+    # Entities and relationships (Agent 3 -> Agent 5)
+    entities: List[Entity] = Field(default_factory=list)
+    relationships: List[Relationship] = Field(default_factory=list)
+    correlated_entities: List[CorrelationMatch] = Field(default_factory=list)
+
+    # Investigation outputs (Agents 6-9)
+    timeline: List[TimelineEvent] = Field(default_factory=list)
+    contradictions: List[Contradiction] = Field(default_factory=list)
+    risk_score: RiskAssessment = Field(default_factory=RiskAssessment)
+    insights_summary: InsightsSummary = Field(default_factory=InsightsSummary)
+    explanations: List[FindingExplanation] = Field(default_factory=list)
+
+    # Q&A and mentoring (Agents 10-11)
+    qa_history: List[QAExchange] = Field(default_factory=list)
+    mentor_recommendations: List[MentorRecommendation] = Field(default_factory=list)
+    readiness: ReadinessAssessment = Field(default_factory=ReadinessAssessment)
+    fir_draft: FIRDraft = Field(default_factory=FIRDraft)
+
+    # Tracking
+    agent_results: Dict[str, Any] = Field(default_factory=dict)
+    agent_runs: List[Dict[str, Any]] = Field(default_factory=list)
+    errors: List[Dict[str, Any]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+    def to_serializable(self) -> Dict[str, Any]:
+        """Serialize to JSON-safe dict (for persistence/API)."""
+        return self.model_dump(mode="json")
+
+    def touch(self) -> None:
+        self.updated_at = utc_now_iso()
+
+    def add_error(self, agent_name: str, message: str, detail: Dict[str, Any] | None = None) -> None:
+        self.errors.append(
+            {"agent_name": agent_name, "message": message, "detail": detail or {}, "at": utc_now_iso()}
         )
-    )
+        self.touch()
+
+    def add_warning(self, warning: str) -> None:
+        if warning and warning not in self.warnings:
+            self.warnings.append(warning)
+            self.touch()
+
+    def add_agent_run(self, run: Dict[str, Any]) -> None:
+        self.agent_runs.append(run)
+        self.touch()
+
+    def record_result(self, result: AgentResult) -> None:
+        self.agent_results[result.agent_name] = result.to_dict()
+        self.touch()
 
 
-def add_confidence_score(
-    state: InvestigationState,
-    item_id: str,
-    category: Literal["entity", "relationship", "timeline", "contradiction", "risk"],
-    score: float,
-    reason: Optional[str] = None,
-) -> None:
-    """Appends a ConfidenceScore entry to state in-place."""
-    state["confidence_scores"].append(
-        ConfidenceScore(
-            item_id=item_id,
-            category=category,
-            score=score,
-            reason=reason,
-        )
-    )
-
-
-def add_evidence_reference(
-    state: InvestigationState,
-    finding: str,
-    evidence_id: str,
-    source: str,
-    timestamp: Optional[str] = None,
-    excerpt: Optional[str] = None,
-) -> None:
-    """Appends an EvidenceReference entry to state in-place."""
-    state["evidence_references"].append(
-        EvidenceReference(
-            finding=finding,
-            evidence_id=evidence_id,
-            source=source,
-            timestamp=timestamp,
-            excerpt=excerpt,
-        )
-    )
-
-
-def flag_for_review(
-    state: InvestigationState,
-    item_id: str,
-    category: Literal[
-        "contradiction", "risk_score", "correlated_entity",
-        "fir_draft", "major_finding"
-    ],
-    notes: Optional[str] = None,
-) -> None:
-    """Marks an item as pending_review. Call this from Agents 6, 7, 4, 11
-    (contradictions, risk, correlation, FIR) whenever they produce a
-    sensitive/high-impact output.
-    """
-    state["human_review_status"].append(
-        HumanReviewStatus(
-            item_id=item_id,
-            category=category,
-            status="pending_review",
-            reviewed_by=None,
-            reviewed_at=None,
-            notes=notes,
-        )
-    )
+def state_from_dict(data: Dict[str, Any]) -> InvestigationState:
+    """Build a validated InvestigationState from a plain dict (API/service boundary)."""
+    return InvestigationState.model_validate(data)
