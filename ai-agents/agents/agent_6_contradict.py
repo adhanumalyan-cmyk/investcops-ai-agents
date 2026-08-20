@@ -3,13 +3,35 @@ agents/agent_6_contradict.py
 
 Agent 6 - Contradiction Detection
 
-Input : state["entities"], state["timeline"]
-Output: {"contradictions": [{"statement_a": "", "statement_b": "", "explanation": ""}]}
+Input:
+    state["entities"]
+    state["timeline"]
+    state["relationships"]   (used if available, for richer detection)
 
-Also, for every contradiction found:
-  - add_confidence_score(category="contradiction")
-  - add_evidence_reference(...) for BOTH statements involved
-  - flag_for_review(category="contradiction")  (contradictions always need human sign-off)
+Output:
+    {
+        "contradictions": [
+            {
+                "contradiction_id": "CONTRA001",
+                "description": "Rahul is reported in Chennai and Coimbatore at the same time.",
+                "evidence_ids": ["EVD001", "EVD004"],
+                "conflicting_values": ["Chennai", "Coimbatore"],
+                "severity": "high",
+                "confidence": 0.85
+            }
+        ]
+    }
+
+Purpose:
+    Detect genuine inconsistencies across evidence — conflicting
+    locations, conflicting timestamps for what should be the same
+    event, contradictory statements attributed to the same person.
+
+Important:
+    A contradiction does NOT mean someone lied — it flags evidence that
+    needs investigator review. This agent must NOT invent contradictions
+    that are not clearly supported by the evidence, and must NOT cite
+    an evidence_id it cannot verify exists.
 """
 
 from datetime import datetime
@@ -22,36 +44,44 @@ from core.state import (
     add_evidence_reference,
     flag_for_review,
 )
+
 from core.base_agent import BaseAgent
 
 
 class ContradictionDetectionAgent(BaseAgent):
-    """Cross-checks entity mentions and timeline events to surface
-    conflicting statements/evidence that investigators need to resolve.
-    """
 
     AGENT_NAME = "Agent 6 - Contradiction Detection"
 
     def __init__(self, model_used: str = "qwen3:8b"):
-        super().__init__(agent_name=self.AGENT_NAME, model_used=model_used)
+        super().__init__(agent_name=self.AGENT_NAME, model_name=model_used)
 
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # MAIN PROCESS
+    # ==========================================================
+
     def process(self, state: InvestigationState) -> Dict[str, Any]:
         started_at = datetime.utcnow()
+
         entities: Dict[str, List[Dict[str, Any]]] = state.get("entities", {})
-        timeline: List[Dict[str, str]] = state.get("timeline", [])
+        timeline: List[Dict[str, Any]] = state.get("timeline", [])
+        relationships: List[Dict[str, Any]] = state.get("relationships", [])
+
+        empty_contradictions: List[Dict[str, Any]] = []
 
         if not entities and not timeline:
             log_agent_execution(
-                state,
-                agent_name=self.AGENT_NAME,
-                model_used=self.model_used,
-                started_at=started_at,
-                status="partial",
-                input_evidence=[],
+                state, agent_name=self.AGENT_NAME, model_used=self.model_name,
+                started_at=started_at, status="partial", input_evidence=[],
                 output_summary="No entities or timeline found in state; skipping contradiction detection.",
             )
-            return {"contradictions": []}
+            return {"contradictions": empty_contradictions}
+
+        # Build the set of evidence IDs we can actually verify, so we
+        # never let a hallucinated evidence ID anchor a contradiction.
+        known_evidence_ids = set(state.get("evidence_metadata", {}).keys())
+        for event in timeline:
+            for eid in event.get("evidence_ids", []) or []:
+                known_evidence_ids.add(eid)
 
         try:
             schema = {
@@ -62,155 +92,172 @@ class ContradictionDetectionAgent(BaseAgent):
                         "items": {
                             "type": "object",
                             "properties": {
-                                "statement_a": {"type": "string"},
-                                "statement_b": {"type": "string"},
-                                "explanation": {"type": "string"},
-                                "evidence_a_id": {"type": "string"},
-                                "evidence_b_id": {"type": "string"},
-                                "timestamp_a": {"type": "string"},
-                                "timestamp_b": {"type": "string"},
+                                "description": {"type": "string"},
+                                "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                                "conflicting_values": {"type": "array", "items": {"type": "string"}},
+                                "severity": {"type": "string", "enum": ["low", "medium", "high"]},
                                 "confidence": {"type": "number"},
-                                "severity": {
-                                    "type": "string",
-                                    "enum": ["low", "medium", "high"],
-                                },
                             },
-                            "required": ["statement_a", "statement_b", "explanation"],
+                            "required": ["description", "conflicting_values", "severity", "confidence"],
                         },
                     }
                 },
                 "required": ["contradictions"],
             }
-            prompt = self._build_prompt(entities, timeline)
+
+            prompt = self._build_prompt(entities, timeline, relationships)
+
+            print("\n========== AGENT 6 PROMPT ==========")
+            print(prompt)
+            print("========== END AGENT 6 DEBUG ==========\n")
+
             result = self.call_llm(prompt, json_schema=schema)
             raw_contradictions = result.get("contradictions", []) or []
+            if not isinstance(raw_contradictions, list):
+                raise ValueError("LLM returned invalid contradictions format.")
 
-            contradictions: List[Dict[str, str]] = []
+            contradictions: List[Dict[str, Any]] = []
 
-            for idx, c in enumerate(raw_contradictions):
-                statement_a = (c.get("statement_a") or "").strip()
-                statement_b = (c.get("statement_b") or "").strip()
-                explanation = (c.get("explanation") or "").strip()
-                if not statement_a or not statement_b:
+            for idx, item in enumerate(raw_contradictions):
+                if not isinstance(item, dict):
                     continue
 
-                contradiction_id = f"CONTRA{idx + 1:03d}"
-                severity = c.get("severity", "medium")
-                confidence = float(c.get("confidence", 0.7))
+                description = str(item.get("description", "")).strip()
+                conflicting_values = item.get("conflicting_values", []) or []
+                if not description or not conflicting_values:
+                    continue
 
-                contradictions.append(
-                    {
-                        "contradiction_id": contradiction_id,
-                        "statement_a": statement_a,
-                        "statement_b": statement_b,
-                        "explanation": explanation,
-                        "severity": severity,
-                    }
-                )
+                evidence_ids_raw = item.get("evidence_ids", []) or []
+                verified_evidence_ids = [eid for eid in evidence_ids_raw if eid in known_evidence_ids]
+
+                severity = item.get("severity", "medium")
+                if severity not in ("low", "medium", "high"):
+                    severity = "medium"
+
+                try:
+                    confidence = float(item.get("confidence", 0.7))
+                except (TypeError, ValueError):
+                    confidence = 0.7
+                confidence = max(0.0, min(1.0, confidence))
+
+                # Down-weight confidence if the LLM cited evidence we
+                # couldn't verify — an unverifiable link is weaker proof.
+                if evidence_ids_raw and not verified_evidence_ids:
+                    confidence = round(confidence * 0.5, 2)
+
+                contradiction_id = f"CONTRA{idx + 1:03d}"
+
+                contradictions.append({
+                    "contradiction_id": contradiction_id,
+                    "description": description,
+                    "evidence_ids": verified_evidence_ids,
+                    "conflicting_values": [str(v) for v in conflicting_values],
+                    "severity": severity,
+                    "confidence": confidence,
+                })
 
                 add_confidence_score(
-                    state,
-                    item_id=contradiction_id,
-                    category="contradiction",
-                    score=confidence,
-                    reason=explanation,
+                    state, item_id=contradiction_id, category="contradiction",
+                    score=confidence, reason=description,
                 )
 
-                add_evidence_reference(
-                    state,
-                    finding=statement_a,
-                    evidence_id=c.get("evidence_a_id", "UNKNOWN"),
-                    source="cross-evidence analysis",
-                    timestamp=c.get("timestamp_a"),
-                    excerpt=statement_a,
-                )
-                add_evidence_reference(
-                    state,
-                    finding=statement_b,
-                    evidence_id=c.get("evidence_b_id", "UNKNOWN"),
-                    source="cross-evidence analysis",
-                    timestamp=c.get("timestamp_b"),
-                    excerpt=statement_b,
-                )
+                for eid in verified_evidence_ids:
+                    add_evidence_reference(
+                        state, finding=description, evidence_id=eid,
+                        source="cross-evidence contradiction analysis",
+                    )
 
+                # Every contradiction requires human sign-off.
                 flag_for_review(
-                    state,
-                    item_id=contradiction_id,
-                    category="contradiction",
-                    notes=f"Severity: {severity}. {explanation}",
+                    state, item_id=contradiction_id, category="contradiction",
+                    notes=f"Severity: {severity}. {description}",
                 )
 
             log_agent_execution(
-                state,
-                agent_name=self.AGENT_NAME,
-                model_used=self.model_used,
-                started_at=started_at,
-                status="success",
-                input_evidence=[e.get("timeline_id", "") for e in timeline] or ["entities_only"],
+                state, agent_name=self.AGENT_NAME, model_used=self.model_name,
+                started_at=started_at, status="success",
+                input_evidence=sorted(known_evidence_ids),
                 output_summary=f"Detected {len(contradictions)} contradiction(s).",
             )
 
             return {"contradictions": contradictions}
 
         except Exception as e:
+            print(f"[Agent 6] Failed: {e}")
             log_agent_execution(
-                state,
-                agent_name=self.AGENT_NAME,
-                model_used=self.model_used,
-                started_at=started_at,
-                status="failed",
-                input_evidence=[],
-                output_summary="Contradiction detection failed.",
-                error_message=str(e),
+                state, agent_name=self.AGENT_NAME, model_used=self.model_name,
+                started_at=started_at, status="failed", input_evidence=[],
+                output_summary="Contradiction detection failed.", error_message=str(e),
             )
-            return {"contradictions": []}
+            return {"contradictions": empty_contradictions}
 
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # PROMPT BUILDER
+    # ==========================================================
+
     @staticmethod
-    def _build_prompt(entities: Dict[str, List[Dict[str, Any]]], timeline: List[Dict[str, str]]) -> str:
+    def _build_prompt(entities, timeline, relationships) -> str:
         entity_summary = "\n".join(
             f"- [{etype}] {item.get('name')} (mentions: {', '.join(item.get('mentions', [])) or 'unknown'})"
-            for etype, items in (entities or {}).items()
-            for item in items
+            for etype, items in (entities or {}).items() for item in items
         ) or "No entities available."
 
         timeline_summary = "\n".join(
-            f"- {ev.get('timestamp', 'unknown time')}: {ev.get('event', '')} "
-            f"(source: {ev.get('evidence_id', 'unknown')})"
+            f"- {ev.get('timestamp') or 'unknown time'}: {ev.get('description', '')} "
+            f"(evidence: {', '.join(ev.get('evidence_ids', [])) or 'unknown'})"
             for ev in timeline
         ) or "No timeline available."
 
-        return f"""You are a forensic contradiction-detection assistant for INVESTCOPS AI.
+        relationship_summary = "\n".join(
+            f"- {r.get('subject')} {r.get('relationship')} {r.get('object')} "
+            f"(evidence: {', '.join(r.get('source_documents', []) or r.get('evidence_ids', []))})"
+            for r in relationships
+        ) or "No relationships available."
 
-Analyze the entities and timeline of events below. Identify any statements,
-claims, locations, or timestamps that CONTRADICT one another (e.g. a person
-claimed to be in two places at the same time, conflicting witness accounts,
-mismatched timestamps for the same event).
+        return f"""
+You are a forensic contradiction-detection assistant for INVESTCOPS AI.
 
-Only report genuine contradictions, not just differences in detail level.
-For each contradiction, cite which evidence each statement came from if
-possible, and rate your confidence (0.0-1.0) and severity (low/medium/high).
+Analyze the entities, timeline, and relationships below. Identify
+statements, locations, or timestamps that GENUINELY CONTRADICT one
+another — e.g. a person reported in two different locations at
+overlapping times, conflicting timestamps for what should be the same
+event, or contradictory relationship claims.
 
-Entities:
+Only report contradictions clearly supported by the evidence. Do NOT
+report simple differences in detail level as contradictions.
+
+For every contradiction, cite the evidence_ids involved (evidence IDs
+look like "EVD001") ONLY when you can determine them from the timeline
+entries above, list the specific conflicting values, and give a
+severity (low/medium/high) and confidence (0.0-1.0).
+
+ENTITIES:
 {entity_summary}
 
-Timeline:
+TIMELINE:
 {timeline_summary}
 
-Return ONLY valid JSON:
+RELATIONSHIPS:
+{relationship_summary}
+
+IMPORTANT RULES:
+1. Do NOT invent contradictions not supported by the evidence.
+2. Do NOT cite an evidence_id you are not confident about — omit it
+   rather than guess.
+3. If none are found, return an empty list.
+4. Return ONLY valid JSON. No Markdown, no explanations outside JSON.
+
+RETURN EXACTLY THIS JSON STRUCTURE:
+
 {{
-  "contradictions": [
-    {{
-      "statement_a": "<statement 1>",
-      "statement_b": "<statement 2>",
-      "explanation": "<why these conflict>",
-      "evidence_a_id": "<evidence id for statement 1, if known>",
-      "evidence_b_id": "<evidence id for statement 2, if known>",
-      "timestamp_a": "<timestamp, if known>",
-      "timestamp_b": "<timestamp, if known>",
-      "confidence": 0.8,
-      "severity": "high"
-    }}
-  ]
+    "contradictions": [
+        {{
+            "description": "Rahul is reported in Chennai and Coimbatore at the same time.",
+            "evidence_ids": ["EVD001", "EVD004"],
+            "conflicting_values": ["Chennai", "Coimbatore"],
+            "severity": "high",
+            "confidence": 0.85
+        }}
+    ]
 }}
-If none are found, return {{"contradictions": []}}."""
+"""
