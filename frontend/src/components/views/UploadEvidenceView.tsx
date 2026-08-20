@@ -14,9 +14,11 @@ import {
 import { cn } from '../../utils/cn';
 import { sha256Hex, saveToLedger, generateTxHash } from '../../lib/blockchain';
 import { BlockchainLedger } from '../BlockchainLedger';
+// 👇 NEW IMPORT
+import { uploadEvidenceAndAnalyze } from '../../lib/api';
 
 /* ── Types ── */
-type FileStatus = 'validating' | 'uploading' | 'complete' | 'rejected';
+type FileStatus = 'validating' | 'uploading' | 'complete' | 'rejected' | 'analyzing';
 
 export interface UploadedFile {
   id: string;
@@ -27,16 +29,18 @@ export interface UploadedFile {
   category: string;
   status: FileStatus;
   progress: number;
+  fileObj?: File; // 👈 Actual file object for upload
   error?: string;
+  result?: any; // AI result
 }
 
 interface UploadEvidenceViewProps {
-  onAnalyze?: (files: UploadedFile[]) => void;
+  onAnalyze?: (files: UploadedFile[], results: any) => void;
   onCancel?: () => void;
 }
 
 /* ── Config ── */
-const ACCEPTED = ['pdf', 'txt', 'docx', 'jpg', 'jpeg', 'png', 'mp4', 'mp3', 'zip', 'raw', 'json', 'wav', 'apk', 'e01', 'dd', 'pcap'];
+const ACCEPTED = ['pdf', 'txt', 'docx', 'jpg', 'jpeg', 'png', 'mp4', 'mp3', 'zip', 'raw', 'json', 'wav', 'apk'];
 
 const SUPPORTED_TYPES: { label: string; icon: LucideIcon; color: string }[] = [
   { label: 'PDF',  icon: FileText,  color: 'text-red-400' },
@@ -71,12 +75,6 @@ const PIPELINE: { title: string; icon: LucideIcon; accent: AccentColor; descript
   { title: 'Investigation Report',   icon: FileCheck,    accent: 'blue',    description: 'ISO 27037 court dossier' }
 ];
 
-const SEED_FILES: UploadedFile[] = [
-  { id: 'f1', name: 'whatsapp_chat_export_kpc-8941.zip', size: '42.8 MB', type: 'ZIP Archive', uploadedAt: 'Just now',  category: 'whatsapp', status: 'complete', progress: 100 },
-  { id: 'f2', name: 'victim_audio_intercept_voip.mp3',   size: '8.2 MB',  type: 'MP3 Audio',   uploadedAt: '2 min ago', category: 'audio',    status: 'complete', progress: 100 },
-  { id: 'f3', name: 'suspect_screenshot_profile.png',    size: '1.4 MB',  type: 'PNG Image',   uploadedAt: '5 min ago', category: 'images',   status: 'complete', progress: 100 }
-];
-
 const ACCENT_CARD: Record<string, string> = {
   emerald: 'bg-emerald-500/12 border-emerald-500/45 text-emerald-400 shadow-[0_0_18px_rgba(16,185,129,0.18)]',
   pink:    'bg-pink-500/12 border-pink-500/45 text-pink-400 shadow-[0_0_18px_rgba(236,72,153,0.18)]',
@@ -91,15 +89,17 @@ const ACCENT_CARD: Record<string, string> = {
 export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyze, onCancel }) => {
   const [dragActive, setDragActive] = useState(false);
   const [category, setCategory] = useState('whatsapp');
-  const [files, setFiles] = useState<UploadedFile[]>(SEED_FILES);
+  const [caseId, setCaseId] = useState('KPC-2026-8941'); // 👈 NEW
+  const [investigator, setInvestigator] = useState('DySP Rajesh'); // 👈 NEW
+  const [files, setFiles] = useState<UploadedFile[]>([]); // 👈 Changed: empty instead of SEED_FILES
   const [analyzing, setAnalyzing] = useState(false);
   const [step, setStep] = useState(0);
   const [justAdded, setJustAdded] = useState(false);
+  const [globalResult, setGlobalResult] = useState<any>(null);
 
   const browseRef = useRef<HTMLInputElement>(null);
   const deviceRef = useRef<HTMLInputElement>(null);
 
-  /* Success flash after files land */
   useEffect(() => {
     if (!justAdded) return;
     const t = setTimeout(() => setJustAdded(false), 2200);
@@ -112,7 +112,6 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
     else if (e.type === 'dragleave') setDragActive(false);
   }, []);
 
-  /* Validate + simulate chunked upload with live progress */
   const addFiles = useCallback((list: FileList | null) => {
     if (!list?.length) return;
 
@@ -129,13 +128,13 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
         category,
         status: valid ? 'validating' : 'rejected',
         progress: valid ? 0 : 100,
+        fileObj: f, // 👈 Store actual file object
         error: valid ? undefined : `Unsupported .${ext} format`
       };
     });
 
     setFiles(prev => [...incoming, ...prev]);
 
-    /* Animate upload progress for each valid file */
     incoming.filter(f => f.status === 'validating').forEach((file, idx) => {
       setTimeout(() => {
         setFiles(prev => prev.map(f => f.id === file.id ? { ...f, status: 'uploading' } : f));
@@ -143,12 +142,11 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
         const tick = setInterval(() => {
           p += Math.floor(Math.random() * 22) + 12;
           if (p >= 100) {
-            p = 100;
             clearInterval(tick);
             setFiles(prev => prev.map(f => f.id === file.id ? { ...f, progress: 100, status: 'complete' } : f));
             setJustAdded(true);
-            // Blockchain notarize - hash file name + size + time
-            sha256Hex(`${file.name}-${file.size}-${Date.now()}-${Math.random()}`).then(hash=>{
+            // Blockchain notarize (mock) - only for demo, actual notarization happens in backend
+            sha256Hex(`${file.name}-${file.size}-${Date.now()}`).then(hash=>{
               const tx = generateTxHash(hash);
               saveToLedger({
                 hash, fileName: file.name, fileSize: file.size,
@@ -174,21 +172,61 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
 
   const removeFile = (id: string) => setFiles(prev => prev.filter(f => f.id !== id));
 
-  const readyFiles = files.filter(f => f.status === 'complete');
+  const readyFiles = files.filter(f => f.status === 'complete' && f.fileObj);
   const rejectedCount = files.filter(f => f.status === 'rejected').length;
-  const busy = files.some(f => f.status === 'uploading' || f.status === 'validating');
+  const busy = files.some(f => f.status === 'uploading' || f.status === 'validating' || f.status === 'analyzing');
 
-  const startAnalysis = () => {
+  // ============================================================
+  // 👇 UPDATED: REAL ANALYSIS WITH BACKEND
+  // ============================================================
+  const startAnalysis = async () => {
     if (!readyFiles.length) return;
-    setAnalyzing(true); setStep(0);
-    let s = 0;
-    const timer = setInterval(() => {
-      s++; setStep(s);
-      if (s >= PIPELINE.length) {
-        clearInterval(timer);
-        setTimeout(() => { setAnalyzing(false); onAnalyze?.(readyFiles); }, 550);
-      }
-    }, 650);
+    setAnalyzing(true);
+    setStep(0);
+    setGlobalResult(null);
+
+    // Take first ready file for demo
+    const targetFile = readyFiles[0];
+    if (!targetFile.fileObj) return;
+
+    try {
+      setFiles(prev => prev.map(f =>
+        f.id === targetFile.id ? { ...f, status: 'analyzing' } : f
+      ));
+      setStep(1);
+
+      // 🔥 ACTUAL API CALL
+      const response = await uploadEvidenceAndAnalyze(
+        targetFile.fileObj,
+        caseId,
+        investigator,
+        category
+      );
+
+      setStep(2);
+      await new Promise(r => setTimeout(r, 300));
+      setStep(3);
+      await new Promise(r => setTimeout(r, 300));
+      setStep(4);
+      await new Promise(r => setTimeout(r, 300));
+      setStep(5);
+
+      setFiles(prev => prev.map(f =>
+        f.id === targetFile.id ? { ...f, status: 'complete', result: response.results } : f
+      ));
+
+      setGlobalResult(response);
+      setAnalyzing(false);
+
+      onAnalyze?.(readyFiles, response.results);
+
+    } catch (error: any) {
+      console.error('Analysis failed:', error);
+      setFiles(prev => prev.map(f =>
+        f.id === targetFile.id ? { ...f, status: 'rejected', error: error.message || 'Analysis failed' } : f
+      ));
+      setAnalyzing(false);
+    }
   };
 
   return (
@@ -210,6 +248,20 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
 
         {/* ══ LEFT: Upload + Categories + Files ══ */}
         <div className="xl:col-span-2 space-y-5 lg:space-y-6 min-w-0">
+
+          {/* Case Details */}
+          <GlassCard accent="blue">
+            <div className="grid grid-cols-2 gap-4">
+              <label className="space-y-1">
+                <span className="text-[11px] font-mono text-slate-500">CASE ID</span>
+                <input value={caseId} onChange={e => setCaseId(e.target.value)} className="w-full px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-sm text-white focus:border-blue-500/50 focus:outline-none" />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] font-mono text-slate-500">INVESTIGATOR</span>
+                <input value={investigator} onChange={e => setInvestigator(e.target.value)} className="w-full px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-sm text-white focus:border-blue-500/50 focus:outline-none" />
+              </label>
+            </div>
+          </GlassCard>
 
           {/* Dropzone */}
           <motion.div
@@ -350,6 +402,7 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
                     const CatIcon = cat?.icon || FileText;
                     const rejected = file.status === 'rejected';
                     const uploading = file.status === 'uploading' || file.status === 'validating';
+                    const analyzingStatus = file.status === 'analyzing';
 
                     return (
                       <motion.li
@@ -363,6 +416,8 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
                           'flex items-center gap-3.5 p-3.5 rounded-xl border transition-all group',
                           rejected
                             ? 'bg-red-950/20 border-red-500/30'
+                            : analyzingStatus
+                            ? 'bg-blue-950/20 border-blue-500/40'
                             : 'bg-white/[0.04] border-white/[0.08] hover:border-blue-500/40 hover:bg-blue-500/[0.06]'
                         )}
                       >
@@ -373,6 +428,8 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
                         )}>
                           {rejected
                             ? <AlertCircle className="w-5 h-5 text-red-400" />
+                            : analyzingStatus
+                            ? <Loader2 className="w-5 h-5 text-blue-400 animate-spin" />
                             : <CatIcon className="w-5 h-5 text-blue-400" />}
                         </div>
 
@@ -396,27 +453,44 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
                               <ProgressBar value={file.progress} accent="blue" height="h-1" />
                             </div>
                           )}
+                          {analyzingStatus && (
+                            <div className="mt-1 text-[10px] font-mono text-blue-400">
+                              🔄 AI Analysis in progress...
+                            </div>
+                          )}
                           {rejected && file.error && (
                             <p className="text-[10.5px] font-mono text-red-400 mt-1">{file.error}</p>
                           )}
                         </div>
 
                         <div className="flex items-center gap-2.5 shrink-0">
-                          {file.status === 'complete' && <Badge accent="emerald" size="xs" icon={CheckCircle2}>READY</Badge>}
+                          {file.status === 'complete' && file.result && (
+                            <Badge accent="emerald" size="xs" icon={CheckCircle2}>RISK {file.result.risk_score}/100</Badge>
+                          )}
+                          {file.status === 'complete' && !file.result && (
+                            <Badge accent="emerald" size="xs" icon={CheckCircle2}>READY</Badge>
+                          )}
                           {uploading && (
                             <Badge accent="blue" size="xs">
                               <Loader2 className="w-2.5 h-2.5 animate-spin" />{file.progress}%
                             </Badge>
                           )}
+                          {analyzingStatus && (
+                            <Badge accent="blue" size="xs">
+                              <Loader2 className="w-2.5 h-2.5 animate-spin" /> ANALYZING
+                            </Badge>
+                          )}
                           {rejected && <Badge accent="red" size="xs">REJECTED</Badge>}
 
-                          <button
-                            onClick={() => removeFile(file.id)}
-                            aria-label={`Remove ${file.name}`}
-                            className="w-8 h-8 rounded-lg bg-slate-800/80 hover:bg-red-500/20 text-slate-500 hover:text-red-400 border border-slate-700 hover:border-red-500/40 flex items-center justify-center transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {!analyzingStatus && (
+                            <button
+                              onClick={() => removeFile(file.id)}
+                              aria-label={`Remove ${file.name}`}
+                              className="w-8 h-8 rounded-lg bg-slate-800/80 hover:bg-red-500/20 text-slate-500 hover:text-red-400 border border-slate-700 hover:border-red-500/40 flex items-center justify-center transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                       </motion.li>
                     );
@@ -441,23 +515,23 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
               {PIPELINE.map((s, i) => {
                 const Icon = s.icon;
                 const active = analyzing && i === step;
-                const done = analyzing ? i < step : readyFiles.length > 0 && i === 0;
-                const last = i === PIPELINE.length - 1;
+                const done = analyzing ? i < step : false;
+                const hasResults = globalResult !== null;
 
                 return (
                   <li key={s.title} className="flex gap-3 relative">
-                    {!last && (
+                    {i < PIPELINE.length - 1 && (
                       <span className={cn('absolute left-[19px] top-10 w-0.5 h-7 rounded-full transition-colors duration-500',
-                        done ? 'bg-gradient-to-b from-emerald-500/60 to-emerald-500/15' : 'bg-slate-800')} />
+                        done || (hasResults && i < 6) ? 'bg-gradient-to-b from-emerald-500/60 to-emerald-500/15' : 'bg-slate-800')} />
                     )}
 
                     <div className={cn(
                       'w-10 h-10 rounded-xl shrink-0 flex items-center justify-center border transition-all duration-400',
                       active ? 'bg-blue-500/20 border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.4)]'
-                        : done ? 'bg-emerald-500/15 border-emerald-500/45'
+                        : done || (hasResults && i < 6) ? 'bg-emerald-500/15 border-emerald-500/45'
                         : 'bg-slate-900 border-slate-800'
                     )}>
-                      {done ? <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                      {done || (hasResults && i < 6) ? <CheckCircle2 className="w-5 h-5 text-emerald-400" />
                         : active ? <motion.span animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 2, ease: 'linear' }}>
                             <Icon className="w-5 h-5 text-blue-400" /></motion.span>
                         : <Icon className="w-5 h-5 text-slate-600" />}
@@ -465,7 +539,7 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
 
                     <div className="pb-5 pt-1 flex-1 min-w-0">
                       <h4 className={cn('font-poppins font-semibold text-[12.5px] leading-tight',
-                        active ? 'text-white' : done ? 'text-emerald-300' : 'text-slate-500')}>
+                        active ? 'text-white' : done || (hasResults && i < 6) ? 'text-emerald-300' : 'text-slate-500')}>
                         {s.title}
                       </h4>
                       <p className="text-[10.5px] text-slate-600 leading-tight mt-0.5">{s.description}</p>
@@ -475,10 +549,11 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
               })}
             </ol>
 
-            {step >= PIPELINE.length && (
+            {globalResult && (
               <motion.div {...MOTION.scaleIn()} className="relative z-10 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-center">
                 <CheckCircle2 className="w-6 h-6 text-emerald-400 mx-auto mb-1" />
-                <p className="text-[11px] font-bold text-emerald-300 font-mono">PIPELINE COMPLETE</p>
+                <p className="text-[11px] font-bold text-emerald-300 font-mono">ANALYSIS COMPLETE</p>
+                <p className="text-[10px] text-emerald-400/70">Risk Score: {globalResult.results.risk_score}/100</p>
               </motion.div>
             )}
           </GlassCard>
@@ -563,5 +638,3 @@ export const UploadEvidenceView: React.FC<UploadEvidenceViewProps> = ({ onAnalyz
     </div>
   );
 };
-
-

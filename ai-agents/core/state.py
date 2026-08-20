@@ -1,125 +1,450 @@
+##state
+
 """
 core/state.py
 
 Shared LangGraph state for INVESTCOPS AI.
 
-This TypedDict is passed between ALL agents (Agent 1 -> Agent 11) in the
-pipeline. Every agent reads what it needs from this state and writes its
-output back into it. Keep this file identical across all team members'
-branches -- it is the shared "contract" of the whole system.
+Agent pipeline:
+
+Agent 1 -> Evidence Ingestion
+Agent 2 -> Entity Extraction
+Agent 3 -> Relationship Extraction
+Agent 4 -> Cross-Evidence Correlation
+Agent 5 -> Timeline Reconstruction
+Agent 6 -> Contradiction Detection
+
+The InvestigationState is the shared contract between all agents.
 """
 
 from typing import TypedDict, List, Dict, Optional, Any, Literal
 from datetime import datetime
 
 
-# ---------------------------------------------------------------------------
-# Supporting sub-structures (used inside the main state)
-# ---------------------------------------------------------------------------
+# ============================================================
+# TYPE DEFINITIONS
+# ============================================================
+
+EntityType = Literal[
+    "person",
+    "location",
+    "organization",
+    "device",
+    "phone",
+    "email",
+    "account",
+    "vehicle",
+    "ip_address",
+    "other",
+]
+
+
+# ============================================================
+# EVIDENCE
+# ============================================================
 
 class EvidenceMetadata(TypedDict):
-    """Metadata for a single piece of uploaded evidence."""
-    evidence_id: str          # e.g. "EVD003"
-    file_name: str
-    file_type: str            # pdf, image, audio, video, apk, txt, etc.
-    file_size: int             # bytes
-    source: str                 # e.g. "WhatsApp export", "CCTV", "Phone dump"
-    hash: str                    # SHA-256 hash for chain of custody
-    uploaded_by: str
-    uploaded_at: str              # ISO timestamp string
+    """Metadata belonging to one piece of uploaded evidence."""
 
+    evidence_id: str
+    file_name: str
+    file_type: str
+    file_size: int
+    source: str
+    hash: str
+    uploaded_by: str
+    uploaded_at: str
+
+
+class CleanedDocument(TypedDict):
+    """
+    Normalized document produced by Agent 1.
+
+    Agent 2 consumes these documents.
+    """
+
+    evidence_id: str
+    doc_id: str
+    file_name: str
+    file_type: str
+    source: str
+    cleaned_text: str
+
+
+# ============================================================
+# ENTITIES
+# ============================================================
+
+class Entity(TypedDict):
+    """
+    Entity extracted from evidence by Agent 2.
+    """
+
+    entity_id: str
+    name: str
+    entity_type: EntityType
+    evidence_ids: List[str]
+    mentions: List[str]
+    confidence: float
+
+
+# ============================================================
+# RELATIONSHIPS
+# ============================================================
+
+class Relationship(TypedDict):
+    """
+    Relationship between two entities.
+
+    Produced primarily by Agent 3.
+    """
+
+    relationship_id: str
+    source_entity_id: str
+    target_entity_id: str
+    relationship_type: str
+
+    # Evidence supporting the relationship
+    evidence_ids: List[str]
+
+    # Example:
+    # "Rahul appears to use phone 9876543210 in two evidence sources."
+    explanation: str
+
+    confidence: float
+
+
+# ============================================================
+# CROSS-EVIDENCE CORRELATION
+# ============================================================
+
+class EvidenceCorrelation(TypedDict):
+    """
+    Connection discovered between multiple evidence records.
+
+    Produced by Agent 4.
+    """
+
+    correlation_id: str
+
+    # Evidence records involved in the correlation
+    evidence_ids: List[str]
+
+    # Entities shared between those evidence records
+    shared_entity_ids: List[str]
+
+    # Human-readable type:
+    # "shared_phone", "shared_person", "shared_location",
+    # "shared_device", "multi_entity_match", etc.
+    correlation_type: str
+
+    explanation: str
+
+    confidence: float
+
+
+# ============================================================
+# TIMELINE
+# ============================================================
+
+class TimelineEvent(TypedDict):
+    """
+    One chronological event reconstructed from evidence.
+
+    Produced by Agent 5.
+    """
+
+    event_id: str
+
+    # ISO timestamp if available.
+    # None when evidence does not provide a reliable timestamp.
+    timestamp: Optional[str]
+
+    event_type: str
+    description: str
+
+    evidence_ids: List[str]
+    entity_ids: List[str]
+
+    confidence: float
+
+
+# ============================================================
+# CONTRADICTIONS
+# ============================================================
+
+class Contradiction(TypedDict):
+    """
+    Potential inconsistency detected across evidence.
+
+    Produced by Agent 6.
+
+    IMPORTANT:
+    A contradiction does not automatically mean somebody lied.
+    It indicates evidence requiring investigator review.
+    """
+
+    contradiction_id: str
+
+    description: str
+
+    evidence_ids: List[str]
+
+    # Example:
+    # ["Chennai", "Coimbatore"]
+    conflicting_values: List[str]
+
+    severity: Literal["low", "medium", "high"]
+
+    confidence: float
+
+
+# ============================================================
+# RISK
+# ============================================================
+
+class RiskAssessment(TypedDict):
+    """
+    Investigation/evidence risk assessment.
+
+    Intended for Agent 7.
+    """
+
+    score: float
+    level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+    factors: List[str]
+
+    supporting_evidence_ids: List[str]
+
+    explanation: str
+
+
+# ============================================================
+# CONFIDENCE
+# ============================================================
 
 class ConfidenceScore(TypedDict):
-    """Confidence score attached to any AI-generated result."""
-    item_id: str                # id of the entity / relationship / event / finding
-    category: Literal[
-        "entity", "relationship", "timeline", "contradiction", "risk"
-    ]
-    score: float                  # 0.0 - 1.0
-    reason: Optional[str]          # short explanation for the score
+    """
+    Generic confidence record for AI-generated results.
+    """
 
+    item_id: str
+
+    category: Literal[
+        "entity",
+        "relationship",
+        "correlation",
+        "timeline",
+        "contradiction",
+        "risk",
+    ]
+
+    score: float
+
+    reason: Optional[str]
+
+
+# ============================================================
+# EVIDENCE REFERENCES
+# ============================================================
 
 class EvidenceReference(TypedDict):
-    """Links an AI-generated finding back to the exact evidence that supports it."""
-    finding: str                 # human-readable claim, e.g. "Rahul contacted victim at 10:32 PM"
-    evidence_id: str               # e.g. "EVD003"
-    source: str                      # e.g. "WhatsApp message"
-    timestamp: Optional[str]          # when the evidence event occurred
-    excerpt: Optional[str]             # short supporting snippet/quote from the evidence
+    """
+    Connects an AI finding back to its supporting evidence.
+    """
 
+    finding: str
+    evidence_id: str
+    source: str
+    timestamp: Optional[str]
+    excerpt: Optional[str]
+
+
+# ============================================================
+# AGENT EXECUTION LOG
+# ============================================================
 
 class AgentExecutionMetadata(TypedDict):
-    """Execution/audit trail for a single agent run. Used for debugging & demo."""
-    agent_name: str               # e.g. "Agent 2 - Entity Extraction"
-    model_used: str                 # e.g. "qwen3:8b"
-    started_at: str                   # ISO timestamp
-    execution_time_seconds: float
-    status: Literal["success", "failed", "partial"]
-    input_evidence: List[str]          # list of evidence_ids consumed
-    output_summary: Optional[str]       # brief description of what was produced
-    error_message: Optional[str]         # populated only if status == "failed"
+    """
+    Audit/debug information for every agent execution.
+    """
 
+    agent_name: str
+    model_used: str
+    started_at: str
+    execution_time_seconds: float
+
+    status: Literal[
+        "success",
+        "failed",
+        "partial",
+    ]
+
+    input_evidence: List[str]
+
+    output_summary: Optional[str]
+
+    error_message: Optional[str]
+
+
+# ============================================================
+# HUMAN REVIEW
+# ============================================================
 
 class HumanReviewStatus(TypedDict):
-    """Review status for sensitive AI outputs that need human sign-off."""
-    item_id: str                  # id of the finding/contradiction/risk/FIR section etc.
+    """
+    Human-review state for sensitive AI outputs.
+    """
+
+    item_id: str
+
     category: Literal[
-        "contradiction", "risk_score", "correlated_entity",
-        "fir_draft", "major_finding"
+        "contradiction",
+        "risk_score",
+        "correlated_entity",
+        "fir_draft",
+        "major_finding",
     ]
-    status: Literal["pending_review", "verified", "rejected"]
+
+    status: Literal[
+        "pending_review",
+        "verified",
+        "rejected",
+    ]
+
     reviewed_by: Optional[str]
     reviewed_at: Optional[str]
     notes: Optional[str]
 
 
-# ---------------------------------------------------------------------------
-# Main investigation state
-# ---------------------------------------------------------------------------
+# ============================================================
+# MAIN INVESTIGATION STATE
+# ============================================================
 
 class InvestigationState(TypedDict):
-    # --- Core pipeline fields (original) ---
+    """
+    Shared state passed through the LangGraph investigation pipeline.
+
+    Flow:
+
+    Agent 1
+        ↓
+    cleaned_documents
+        ↓
+    Agent 2
+        ↓
+    entities
+        ↓
+    Agent 3
+        ↓
+    relationships
+        ↓
+    Agent 4
+        ↓
+    correlations
+        ↓
+    Agent 5
+        ↓
+    timeline
+        ↓
+    Agent 6
+        ↓
+    contradictions
+    """
+
+    # --------------------------------------------------------
+    # Agent 1 - Evidence Ingestion
+    # --------------------------------------------------------
+
     raw_texts: List[str]
-    evidence_metadata: Dict[str, EvidenceMetadata]          # keyed by evidence_id
-    cleaned_documents: List[Dict[str, str]]
-    entities: Dict[str, List[Dict[str, str]]]
-    relationships: List[Dict[str, str]]
-    correlated_entities: Dict[str, List[str]]
-    timeline: List[Dict[str, str]]
-    contradictions: List[Dict[str, str]]
-    risk_score: int
+
+    evidence_metadata: Dict[str, EvidenceMetadata]
+
+    cleaned_documents: List[CleanedDocument]
+
+    # --------------------------------------------------------
+    # Agent 2 - Entity Extraction
+    # --------------------------------------------------------
+
+    entities: Dict[str, List[Dict[str, Any]]]
+
+    # --------------------------------------------------------
+    # Agent 3 - Relationship Extraction
+    # --------------------------------------------------------
+
+    relationships: List[Relationship]
+
+    # --------------------------------------------------------
+    # Agent 4 - Cross-Evidence Correlation
+    # --------------------------------------------------------
+
+    correlations: List[EvidenceCorrelation]
+
+    # --------------------------------------------------------
+    # Agent 5 - Timeline Reconstruction
+    # --------------------------------------------------------
+
+    timeline: List[TimelineEvent]
+
+    # --------------------------------------------------------
+    # Agent 6 - Contradiction Detection
+    # --------------------------------------------------------
+
+    contradictions: List[Contradiction]
+
+    # --------------------------------------------------------
+    # Agent 7 - Risk Assessment
+    # --------------------------------------------------------
+
+    risk_assessment: Optional[RiskAssessment]
+
+    # --------------------------------------------------------
+    # Later agents / future pipeline
+    # --------------------------------------------------------
+
     insights_summary: str
-    qa_history: List[Dict[str, str]]
+
+    qa_history: List[Dict[str, Any]]
+
     mentor_recommendations: List[str]
+
     fir_draft: str
 
-    # --- Supporting layers (added) ---
+    # --------------------------------------------------------
+    # Shared supporting information
+    # --------------------------------------------------------
+
     confidence_scores: List[ConfidenceScore]
+
     evidence_references: List[EvidenceReference]
+
     agent_execution_metadata: List[AgentExecutionMetadata]
+
     human_review_status: List[HumanReviewStatus]
 
 
-# ---------------------------------------------------------------------------
-# Helper: build a fresh, empty state
-# ---------------------------------------------------------------------------
+# ============================================================
+# INITIAL STATE
+# ============================================================
 
 def get_initial_state() -> InvestigationState:
-    """Returns a fully-initialized, empty InvestigationState.
-
-    Every agent module should be able to run against this without KeyErrors,
-    since all keys already exist (with empty/default values).
     """
+    Create a fresh InvestigationState.
+
+    This can be used when starting a new LangGraph investigation.
+    """
+
     return InvestigationState(
         raw_texts=[],
         evidence_metadata={},
         cleaned_documents=[],
         entities={},
         relationships=[],
-        correlated_entities={},
+        correlations=[],
         timeline=[],
         contradictions=[],
-        risk_score=0,
+        risk_assessment=None,
         insights_summary="",
         qa_history=[],
         mentor_recommendations=[],
@@ -131,9 +456,9 @@ def get_initial_state() -> InvestigationState:
     )
 
 
-# ---------------------------------------------------------------------------
-# Small utility helpers agents can reuse (optional, but saves repetition)
-# ---------------------------------------------------------------------------
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
 
 def log_agent_execution(
     state: InvestigationState,
@@ -145,12 +470,14 @@ def log_agent_execution(
     output_summary: Optional[str] = None,
     error_message: Optional[str] = None,
 ) -> None:
-    """Appends an AgentExecutionMetadata entry to state in-place.
-
-    Call this at the end of every agent's `run()` method so we always have
-    a full audit trail of the pipeline (useful for the demo + debugging).
     """
-    execution_time = (datetime.utcnow() - started_at).total_seconds()
+    Add one agent execution record to the shared state.
+    """
+
+    execution_time = (
+        datetime.utcnow() - started_at
+    ).total_seconds()
+
     state["agent_execution_metadata"].append(
         AgentExecutionMetadata(
             agent_name=agent_name,
@@ -168,11 +495,26 @@ def log_agent_execution(
 def add_confidence_score(
     state: InvestigationState,
     item_id: str,
-    category: Literal["entity", "relationship", "timeline", "contradiction", "risk"],
+    category: Literal[
+        "entity",
+        "relationship",
+        "event",
+        "correlation",
+        "timeline",
+        "contradiction",
+        "risk",
+    ],
     score: float,
     reason: Optional[str] = None,
 ) -> None:
-    """Appends a ConfidenceScore entry to state in-place."""
+    """
+    Add a confidence score to the shared state.
+
+    The score is automatically clamped to 0.0 - 1.0.
+    """
+
+    score = max(0.0, min(1.0, float(score)))
+
     state["confidence_scores"].append(
         ConfidenceScore(
             item_id=item_id,
@@ -191,7 +533,10 @@ def add_evidence_reference(
     timestamp: Optional[str] = None,
     excerpt: Optional[str] = None,
 ) -> None:
-    """Appends an EvidenceReference entry to state in-place."""
+    """
+    Connect an AI-generated finding to its source evidence.
+    """
+
     state["evidence_references"].append(
         EvidenceReference(
             finding=finding,
@@ -207,15 +552,18 @@ def flag_for_review(
     state: InvestigationState,
     item_id: str,
     category: Literal[
-        "contradiction", "risk_score", "correlated_entity",
-        "fir_draft", "major_finding"
+        "contradiction",
+        "risk_score",
+        "correlated_entity",
+        "fir_draft",
+        "major_finding",
     ],
     notes: Optional[str] = None,
 ) -> None:
-    """Marks an item as pending_review. Call this from Agents 6, 7, 4, 11
-    (contradictions, risk, correlation, FIR) whenever they produce a
-    sensitive/high-impact output.
     """
+    Mark a sensitive AI output for human investigator review.
+    """
+
     state["human_review_status"].append(
         HumanReviewStatus(
             item_id=item_id,

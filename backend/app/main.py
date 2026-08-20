@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
+from .api.upload_routes import router as upload_router  # 👈 NEW IMPORT
 from .core.config import settings
 
 app = FastAPI(
@@ -27,8 +28,12 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix=settings.api_prefix)
-
+app.include_router(upload_router)  # 👈 NEW ROUTER (already has /api/upload prefix)
 
 @app.get("/")
 def root():
     return {"service": settings.app_name, "docs": "/docs", "api": settings.api_prefix}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
